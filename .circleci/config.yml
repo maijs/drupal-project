@@ -1,0 +1,138 @@
+version: 2.1
+
+orbs:
+  silta: silta/silta@1
+
+executors:
+  cicd82:
+    docker:
+      - image: wunderio/silta-cicd:circleci-php8.2-node20-composer2-v1
+
+workflows:
+  commit:
+    jobs:
+      - approval:
+          type: approval
+          name: approve-deployment
+          filters:
+            branches:
+              ignore:
+                - production
+                - main
+                - /dependabot\/.*/
+
+      - silta/drupal-validate:
+          name: validate
+          executor: cicd82
+          post-validation:
+            - run: echo "You can add additional validation here!"
+
+      - silta/analyze:
+          name: analyze
+          context: analyze
+          sources: web
+
+      # Build job for feature environments.
+      # Other jobs defined below extend this job.
+      - silta/drupal-build: &build
+          name: build
+          executor: cicd82
+          codebase-build:
+            - silta/drupal-composer-install
+            - silta/npm-install-build
+          context: silta_dev
+          requires:
+            - validate
+            - analyze
+            - approve-deployment
+          filters:
+            branches:
+              ignore:
+                - production
+                - main
+                - /dependabot\/.*/
+
+      # Deploy job for feature environments.
+      # Other jobs defined below extend this job.
+      - silta/drupal-deploy: &deploy
+          name: deploy
+          executor: cicd82
+          silta_config: silta/silta.yml,silta/silta.secret
+          pre-release:
+            - silta/decrypt-files:
+                files: silta/silta.secret
+                # SEC_DRUPAL_PROJECT_SILTA_DEV holds the secret key for decryption purposes.
+                # This is stored in CircleCI as an environment variable and also in LastPass.
+                secret_key_env: SEC_DRUPAL_PROJECT_SILTA_DEV
+          context: silta_dev
+          requires:
+            - build
+          filters:
+            branches:
+              ignore:
+                - production
+                - main
+                - /dependabot\/.*/
+
+      # Build job for main environment.
+      # Extends the job defined for feature environments.
+      - silta/drupal-build:
+          <<: *build
+          name: build-main
+          requires:
+            - validate
+            - analyze
+          filters:
+            branches:
+              only:
+                - main
+
+      # Deploy job for main environment.
+      # Extends the job defined for feature environments.
+      - silta/drupal-deploy:
+          <<: *deploy
+          name: deploy-main
+          silta_config: silta/silta.yml,silta/silta.secret,silta/silta-main.yml
+          requires:
+            - build-main
+          filters:
+            branches:
+              only:
+                - main
+
+      # Build job for production environment.
+      # Extends the job defined for feature environments.
+      - silta/drupal-build:
+          <<: *build
+          name: build-prod
+          context: silta_finland
+          requires:
+            - validate
+            - analyze
+          filters:
+            branches:
+              only: production
+
+      # Deploy job for production environment.
+      # Extends the job defined for feature environments.
+      - silta/drupal-deploy:
+          <<: *deploy
+          name: deploy-prod
+          silta_config: silta/silta.yml,silta/silta-prod.yml
+          context: silta_finland
+          requires:
+            - build-prod
+          filters:
+            branches:
+              only: production
+
+      # This enables validation on dependabot PRs
+      # Build job for dependabot environments.
+      # Extends the job defined for feature environments.
+      #- silta/drupal-build:
+      #    <<: *build
+      #    name: build-dependabot
+      #    skip-deployment: true
+      #    filters:
+      #      branches:
+      #        only: /dependabot\/.*/
